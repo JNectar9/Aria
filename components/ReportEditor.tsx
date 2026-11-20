@@ -2,8 +2,15 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabaseBrowser } from '@/lib/supabase/client'
-import { computeVerdict, stats, EXPLAIN, type Run } from '@/lib/verdict'
+import { computeVerdict, stats, evidenceLevel, EXPLAIN, type Run, type Proof } from '@/lib/verdict'
 import { VERDICT } from './bits'
+
+async function sha256(file: File) {
+  const hash = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+const EMPTY = { seed: '', value: '', note: '', failed: false, kind: 'none' as 'none' | 'file' | 'link', link: '', commit: '', file: null as File | null }
 
 export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects: any[]; pdfUrl: string | null }) {
   const router = useRouter(); const locked = !!v.locked_at
@@ -13,12 +20,12 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
     reviewer_name: v.reviewer_name ?? '', review_done: !!v.review_done, project_id: v.project_id ?? '',
   })
   const [runs, setRuns] = useState<Run[]>(v.runs ?? [])
-  const [nr, setNr] = useState({ seed: '', value: '', note: '', failed: false })
+  const [nr, setNr] = useState({ ...EMPTY })
   const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false)
   const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value })
   const num = (x: any) => (x === '' || x == null ? null : Number(x))
   const spec = { reported_value: num(f.reported_value), tolerance: num(f.tolerance), required_runs: num(f.required_runs), runs, blocked_reason: String(f.blocked_reason).trim() || null }
-  const verdict = computeVerdict(spec); const st = stats(spec)
+  const verdict = computeVerdict(spec); const st = stats(spec); const level = evidenceLevel(runs)
   const quotaFull = spec.required_runs != null && st.n >= spec.required_runs
   const sb = supabaseBrowser()
 
@@ -52,8 +59,32 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
   async function addRun() {
     const value = Number(nr.value)
     if (!nr.failed && (nr.value === '' || Number.isNaN(value))) return setMsg('Enter the measured value, or tick "run failed".')
-    await save([...runs, { seed: nr.seed.trim() || undefined, value: nr.failed ? NaN : value, note: nr.note.trim() || undefined, failed: nr.failed }].map((r) => ({ ...r, value: Number.isNaN(r.value) ? 0 : r.value })))
-    setNr({ seed: '', value: '', note: '', failed: false })
+    let proof: Proof | undefined
+    setBusy(true)
+    try {
+      if (nr.kind === 'file') {
+        if (!nr.file) { setBusy(false); return setMsg('Choose the log file, or pick another proof type.') }
+        if (nr.file.size > 10 * 1024 * 1024) { setBusy(false); return setMsg('Keep the file under 10 MB.') }
+        const hash = await sha256(nr.file)
+        const path = `${v.user_id}/${v.id}/${Date.now()}-${nr.file.name.replace(/[^\w.-]/g, '_')}`
+        const up = await sb.storage.from('evidence').upload(path, nr.file)
+        if (up.error) { setBusy(false); return setMsg(up.error.message) }
+        proof = { kind: 'file', name: nr.file.name, path, sha256: hash, size: nr.file.size }
+      } else if (nr.kind === 'link') {
+        let u: URL; try { u = new URL(nr.link.trim()) } catch { setBusy(false); return setMsg('Enter a full link, like https://github.com/…') }
+        proof = { kind: 'link', url: u.href }
+      }
+      if (proof && nr.commit.trim()) proof.commit = nr.commit.trim()
+    } catch (e: any) { setBusy(false); return setMsg(e?.message || 'Could not read the file.') }
+    const run: Run = { seed: nr.seed.trim() || undefined, value: nr.failed ? 0 : value, note: nr.note.trim() || undefined, failed: nr.failed, proof }
+    await save([...runs, run])
+    setNr({ ...EMPTY })
+  }
+
+  async function openFile(path?: string) {
+    if (!path) return
+    const { data, error } = await sb.storage.from('evidence').createSignedUrl(path, 300)
+    if (data?.signedUrl) window.open(data.signedUrl, '_blank'); else setMsg(error?.message || 'Could not open the file.')
   }
 
   const vk = verdict ? VERDICT[verdict] : null
@@ -83,10 +114,18 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
 
       <div className="panel">
         <h3>2. Runs ({st.n}{spec.required_runs ? ` of ${spec.required_runs}` : ''} counted)</h3>
-        <p className="hint">Record every run, including failures. Runs cannot be deleted.</p>
+        <p className="hint">Record every run, including failures. Runs cannot be deleted. Attach a log or link so others can check it.</p>
         {runs.length === 0 && <p className="hint">No runs yet.</p>}
         {runs.map((r, i) => (
-          <div className="runrow" key={i}><b>#{i + 1}</b><span>{r.failed ? 'Failed to complete' : r.value}</span><small>{r.seed ? `seed ${r.seed}` : ''} {r.note ?? ''}</small></div>
+          <div className="runrow" key={i}>
+            <b>#{i + 1}</b><span>{r.failed ? 'Failed to complete' : r.value}</span><small>{r.seed ? `seed ${r.seed}` : ''} {r.note ?? ''}</small>
+            <div className="proof">
+              {r.proof?.kind === 'file' && <>Log: {r.proof.name} · SHA-256 {r.proof.sha256?.slice(0, 12)}… <button type="button" className="link" onClick={() => openFile(r.proof?.path)}>Open</button></>}
+              {r.proof?.kind === 'link' && <>Link: <a href={r.proof.url} target="_blank" rel="noreferrer">open</a></>}
+              {!r.proof && 'No proof attached'}
+              {r.proof?.commit ? ` · version ${r.proof.commit}` : ''}
+            </div>
+          </div>
         ))}
         {locked && !quotaFull && !spec.blocked_reason && (
           <div className="addrun">
@@ -95,6 +134,15 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
               <label className="fl"><span>Random seed</span><input value={nr.seed} onChange={(e) => setNr({ ...nr, seed: e.target.value })} /></label>
             </div>
             <label className="fl"><span>Note (optional)</span><input value={nr.note} onChange={(e) => setNr({ ...nr, note: e.target.value })} placeholder="GPU, library versions, anything unusual" /></label>
+            <label className="fl"><span>Proof for this run</span>
+              <select value={nr.kind} onChange={(e) => setNr({ ...nr, kind: e.target.value as any })}>
+                <option value="none">No proof (self-reported)</option>
+                <option value="file">Upload a log file</option>
+                <option value="link">Link to code or run</option>
+              </select></label>
+            {nr.kind === 'file' && <label className="fl"><span>Log file (up to 10 MB)</span><input type="file" onChange={(e) => setNr({ ...nr, file: e.target.files?.[0] ?? null })} /></label>}
+            {nr.kind === 'link' && <label className="fl"><span>Link (GitHub commit, Colab, experiment tracker)</span><input value={nr.link} onChange={(e) => setNr({ ...nr, link: e.target.value })} placeholder="https://github.com/…" /></label>}
+            {nr.kind !== 'none' && <label className="fl"><span>Code version or commit (optional)</span><input value={nr.commit} onChange={(e) => setNr({ ...nr, commit: e.target.value })} /></label>}
             <label className="agree"><input type="checkbox" checked={nr.failed} onChange={(e) => setNr({ ...nr, failed: e.target.checked })} /><span>This run failed to complete</span></label>
             <button className="btn solid" disabled={busy} onClick={addRun}>Add run</button>
           </div>
@@ -105,6 +153,12 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
 
       <div className="panel result">
         <h3>3. Verdict</h3>
+        <div style={{ marginBottom: 10 }}>
+          {level === 'none' && <span className="chip gray">Evidence level: no runs yet</span>}
+          {level === 'self' && <span className="chip warn">Evidence level: self-reported</span>}
+          {level === 'logs' && <span className="chip info">Evidence level: logs attached</span>}
+        </div>
+        <p className="hint">{level === 'logs' ? 'Every run has a log or link, and uploaded files carry a SHA-256 fingerprint so any change would show.' : 'At least one run has no proof attached, so others cannot check it. Attach a log or link to each run.'} Machine-run evidence, where ARIA runs the code itself, is coming later.</p>
         {vk ? <><span className={`chip ${vk[1]} big`}>{vk[0]}</span><p>{EXPLAIN[verdict!]}</p></> : <p className="hint">Still collecting runs. A verdict appears once the required runs are recorded.</p>}
         {st.mean != null && <div className="cols"><div><small>Average measured</small><b>{st.mean.toFixed(3)}</b></div><div><small>Reported</small><b>{spec.reported_value ?? '—'}</b></div><div><small>Difference</small><b>{diff != null ? diff.toFixed(3) : '—'}</b></div><div><small>Spread (sd)</small><b>{st.sd.toFixed(3)}</b></div></div>}
         <p className="hint">Rule: reproduced only if the average and every run are within the tolerance and the spread is not larger than the tolerance. A failed reproduction never proves a paper is false.</p>
