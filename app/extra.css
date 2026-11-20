@@ -36,3 +36,5 @@ a.stat{display:block;color:var(--text)}
 .legal h1,.legal h2{font-family:"Playfair Display",Georgia,serif}
 .legal section{margin-top:36px}
 @media print{.side,.tabs,.bar,.noprint{display:none!important}.app{display:block}.panel{box-shadow:none;break-inside:avoid}}
+.runrow{flex-wrap:wrap}
+.runrow .proof{flex-basis:100%;font-size:.82rem;color:var(--muted);word-break:break-all}
