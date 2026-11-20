@@ -20,4 +20,4 @@ export async function middleware(req: NextRequest) {
   return res
 }
 
-export const config = { matcher: ['/dashboard/:path*'] }
+export const config = { matcher: ['/dashboard/:path*', '/reports/:path*', '/projects/:path*', '/settings/:path*', '/alerts/:path*', '/profile/:path*'] }
