@@ -57,7 +57,7 @@ export default function Auth({ mode }: { mode: 'signup' | 'login' }) {
             {up && <label className="field"><Icon n="user" /><input placeholder="Full Name" aria-label="Full name" autoComplete="name" value={f.name} onChange={set('name')} /></label>}
             <label className="field"><Icon n="lock" /><input type={show ? 'text' : 'password'} placeholder="Password" aria-label="Password" autoComplete={up ? 'new-password' : 'current-password'} value={f.p1} onChange={set('p1')} />{eye}</label>
             {up && <label className="field"><Icon n="lock" /><input type={show ? 'text' : 'password'} placeholder="Confirm Password" aria-label="Confirm password" autoComplete="new-password" value={f.p2} onChange={set('p2')} />{eye}</label>}
-            {up && <label className="agree"><input type="checkbox" checked={f.tos} onChange={set('tos')} /><span>I agree to the <a href="#">Terms of Service</a> and <a href="#">Privacy Policy</a></span></label>}
+            {up && <label className="agree"><input type="checkbox" checked={f.tos} onChange={set('tos')} /><span>I agree to the <a href="/legal#terms">Terms of Service</a> and <a href="/legal#privacy">Privacy Policy</a></span></label>}
             <div className="err" role="alert">{err}</div><div className="msg" role="status">{msg}</div>
             <button className="primary" type="submit" disabled={busy}><Icon n="user" />{busy ? 'Please wait…' : up ? 'Sign Up' : 'Sign In'}</button>
             <div className="secure"><span style={{ color: 'var(--blue2)' }}><Icon n="shield" s={20} /></span>Secure and trusted by JNectarTech</div>
