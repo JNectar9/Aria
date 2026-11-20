@@ -50,7 +50,7 @@ export default function Landing() {
           <div className="proof"><span>Rules locked before results</span><span>Failures never hidden</span><span>Humans in the loop</span></div>
         </div>
         <div className="shot">
-          <Image src="/images/robot.jpg" alt="A friendly white research robot reading holographic DNA and protein data in a laboratory" width={1920} height={1280} priority sizes="(max-width:900px) 100vw, 560px" />
+          <div className="crop" role="img" aria-label="A holographic AI chip and brain dashboard in a laboratory" />
           <div className="float f1"><small>Example claim</small><b>“92% accuracy”</b></div>
           <div className="float f2"><small>Example verdict</small><b className="ok">Reproduced</b></div>
         </div>
