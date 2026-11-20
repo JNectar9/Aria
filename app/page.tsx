@@ -84,12 +84,12 @@ export default function Landing() {
       <section className="sec"><div className="wrap">
         <h2 className="serif">Starting with machine learning. Built for all of science.</h2>
         <p className="sub">Wherever a result can be computed, it can be checked. We begin where experiments run on code, and grow with the right experts beside us.</p>
-        <div className="wide"><Image src="/images/collage.jpg" alt="A scientist touching a holographic data screen, an AI chip dashboard, and a laboratory bench with flasks and pipettes" width={2048} height={1152} sizes="(max-width:1180px) 100vw, 1180px" /></div>
+        <div className="wide"><Image src="/images/ml-lab.jpg" alt="A researcher at a laptop beside a holographic dashboard showing a Reproduced verdict" width={1800} height={771} sizes="(max-width:1180px) 100vw, 1180px" /></div>
         <div className="cards three">{fields.map(([t, d]) => <div className="card2" key={t}><h3 className="serif">{t}</h3><p>{d}</p></div>)}</div>
       </div></section>
 
       <section className="banner">
-        <Image src="/images/students.jpg" alt="Five students in white lab coats reading and examining a flask together" fill sizes="100vw" />
+        <Image src="/images/team.jpg" alt="Three smiling students looking at charts and code on a laptop" fill sizes="100vw" />
         <div className="wrap">
           <h2 className="serif" style={{ fontSize: 'clamp(1.9rem,3.8vw,3.1rem)', maxWidth: '16em' }}>For every curious mind in the lab.</h2>
           <p className="sub" style={{ maxWidth: '38em' }}>Students, postgraduates and independent researchers deserve the same standard of proof as the best-funded institutions. ARIA is built so that rigour is not a privilege.</p>
