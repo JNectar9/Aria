@@ -1,4 +1,5 @@
-export type Run = { seed?: string; value: number; note?: string; failed?: boolean }
+export type Proof = { kind: 'file' | 'link'; name?: string; path?: string; sha256?: string; size?: number; url?: string; commit?: string }
+export type Run = { seed?: string; value: number; note?: string; failed?: boolean; proof?: Proof }
 export type Spec = { reported_value: number | null; tolerance: number | null; required_runs: number | null; runs: Run[] | null; blocked_reason: string | null }
 export type VerdictKey = 'reproduced' | 'not_reproduced' | 'incomplete' | 'inconclusive'
 
@@ -21,6 +22,13 @@ export function computeVerdict(s: Spec): VerdictKey | null {
   if (sd > s.tolerance) return 'inconclusive'
   const allWithin = vals.every((v) => Math.abs(v - s.reported_value!) <= s.tolerance!)
   return Math.abs(mean - s.reported_value) <= s.tolerance && allWithin ? 'reproduced' : 'not_reproduced'
+}
+
+// How much of the evidence can someone else check?
+export function evidenceLevel(runs: Run[] | null): 'none' | 'self' | 'logs' {
+  const all = runs ?? []
+  if (all.length === 0) return 'none'
+  return all.every((r) => !!r.proof) ? 'logs' : 'self'
 }
 
 export const EXPLAIN: Record<VerdictKey, string> = {
