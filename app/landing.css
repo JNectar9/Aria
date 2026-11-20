@@ -63,7 +63,7 @@
 }
 .lp .float b.ok{background:none!important;color:#43d28a}
 .banner img{z-index:0}
-.crop{aspect-ratio:1024/578;border-radius:26px;border:1px solid rgba(130,180,255,.35);box-shadow:0 30px 70px rgba(0,10,50,.6);background:url(/images/collage.jpg) 100% 0/200% 200% no-repeat}
+.crop{aspect-ratio:1024/578;border-radius:26px;border:1px solid rgba(130,180,255,.35);box-shadow:0 30px 70px rgba(0,10,50,.6);background:url(/images/hero.jpg) center/cover no-repeat}
 .banner{min-height:520px;background:#04102f}
 .banner img{object-fit:cover;object-position:75% 50%}
 .banner::before{display:block;background:linear-gradient(90deg,rgba(4,16,47,.55) 0%,rgba(4,16,47,0) 55%)}
