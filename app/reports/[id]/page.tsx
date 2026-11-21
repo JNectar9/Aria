@@ -12,6 +12,8 @@ export default async function ReportPage({ params }: { params: Promise<{ id: str
   const { data: v } = await s.sb.from('verifications').select('*').eq('id', id).maybeSingle()
   if (!v) notFound()
   const { data: projects } = await s.sb.from('projects').select('id,name').order('created_at')
+  const { data: corr } = await s.sb.from('corrections').select('*').eq('verification_id', id).order('created_at', { ascending: true })
+  const corrections = corr ?? []
   let pdfUrl: string | null = null
   if (v.paper_path) {
     const { data } = await s.sb.storage.from('papers').createSignedUrl(v.paper_path, 3600)
@@ -21,10 +23,10 @@ export default async function ReportPage({ params }: { params: Promise<{ id: str
     <Shell active="reports" name={s.name} ini={s.ini} unread={s.unread}>
       <div className="welcome"><div><h1>Verification report</h1><p>Started {new Date(v.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</p></div></div>
       <div className="rp">
-        <AssessmentPanel v={v} />
+        <AssessmentPanel v={v} corrections={corrections} />
         <AnalysisPanel key={v.id + (v.analysis_status ?? '') + (v.selected_claim ?? '') + (v.verdict ?? '')} v={v} />
         {v.analysis_status !== 'done' && <ImportPanel key={v.id} id={v.id} hasPdf={!!v.paper_path} />}
-        <ReportEditor key={v.id + (v.locked_at ?? '')} v={v} projects={projects ?? []} pdfUrl={pdfUrl} />
+        <ReportEditor key={v.id + (v.locked_at ?? '')} v={v} projects={projects ?? []} pdfUrl={pdfUrl} corrections={corrections} />
       </div>
     </Shell>
   )
