@@ -3,6 +3,7 @@ import { getSession } from '@/lib/session'
 import Shell from '@/components/Shell'
 import ReportEditor from '@/components/ReportEditor'
 import AnalysisPanel from '@/components/AnalysisPanel'
+import ImportPanel from '@/components/ImportPanel'
 
 export default async function ReportPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -20,6 +21,7 @@ export default async function ReportPage({ params }: { params: Promise<{ id: str
       <div className="welcome"><div><h1>Verification report</h1><p>Started {new Date(v.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</p></div></div>
       <div className="rp">
         <AnalysisPanel key={v.id + (v.analysis_status ?? '') + (v.selected_claim ?? '')} v={v} />
+        {v.analysis_status !== 'done' && <ImportPanel key={v.id} id={v.id} hasPdf={!!v.paper_path} />}
         <ReportEditor key={v.id + (v.locked_at ?? '') + (v.selected_claim ?? '')} v={v} projects={projects ?? []} pdfUrl={pdfUrl} />
       </div>
     </Shell>
