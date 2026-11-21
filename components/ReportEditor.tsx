@@ -2,15 +2,19 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabaseBrowser } from '@/lib/supabase/client'
-import { computeVerdict, stats, evidenceLevel, EXPLAIN, type Run, type Proof } from '@/lib/verdict'
+import { evaluate, stats, classifyEvidence, EXPLAIN, RULE_LABEL, type Run, type Proof, type Meta, type Rule } from '@/lib/verdict'
 import { VERDICT } from './bits'
 
-async function sha256(file: File) {
-  const hash = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+async function sha256(blob: Blob) {
+  const hash = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())
   return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-const EMPTY = { seed: '', value: '', note: '', failed: false, kind: 'none' as 'none' | 'file' | 'link', link: '', commit: '', file: null as File | null }
+const EMPTY = {
+  seed: '', value: '', note: '', failed: false, failure_reason: '', kind: 'none' as 'none' | 'file' | 'link', link: '', commit: '', file: null as File | null,
+  python: '', libraries: '', os: '', hardware: '', dataset_version: '', config: '', executed_at: '',
+}
+const META_KEYS = ['python', 'libraries', 'os', 'hardware', 'dataset_version', 'config', 'executed_at'] as const
 
 export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects: any[]; pdfUrl: string | null }) {
   const router = useRouter(); const locked = !!v.locked_at
@@ -18,14 +22,15 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
     title: v.title as string, claim_text: v.claim_text ?? '', metric: v.metric ?? '', reported_value: v.reported_value ?? '',
     tolerance: v.tolerance ?? '', required_runs: v.required_runs ?? 3, notes: v.notes ?? '', blocked_reason: v.blocked_reason ?? '',
     reviewer_name: v.reviewer_name ?? '', review_done: !!v.review_done, project_id: v.project_id ?? '',
+    rule: (v.rule ?? 'match') as Rule, tolerance_mode: (v.tolerance_mode ?? 'absolute') as 'absolute' | 'relative',
   })
   const [runs, setRuns] = useState<Run[]>(v.runs ?? [])
   const [nr, setNr] = useState({ ...EMPTY })
   const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false)
   const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value })
   const num = (x: any) => (x === '' || x == null ? null : Number(x))
-  const spec = { reported_value: num(f.reported_value), tolerance: num(f.tolerance), required_runs: num(f.required_runs), runs, blocked_reason: String(f.blocked_reason).trim() || null }
-  const verdict = computeVerdict(spec); const st = stats(spec); const level = evidenceLevel(runs)
+  const spec = { reported_value: num(f.reported_value), tolerance: num(f.tolerance), required_runs: num(f.required_runs), runs, blocked_reason: String(f.blocked_reason).trim() || null, rule: f.rule, tolerance_mode: f.tolerance_mode }
+  const ev = evaluate(spec); const verdict = ev.verdict; const st = stats(spec); const ec = classifyEvidence(runs)
   const quotaFull = spec.required_runs != null && st.n >= spec.required_runs
   const sb = supabaseBrowser()
 
@@ -33,16 +38,17 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
     if (!f.claim_text.trim() || !f.metric.trim()) return setMsg('Write the claim and the metric first.')
     if (spec.reported_value == null || Number.isNaN(spec.reported_value)) return setMsg('Enter the value the paper reports.')
     if (!spec.tolerance || spec.tolerance <= 0) return setMsg('Set a tolerance above zero.')
+    if (f.tolerance_mode === 'relative' && spec.reported_value === 0) return setMsg('A percentage tolerance cannot be used when the reported value is 0.')
     if (!spec.required_runs || spec.required_runs < 1) return setMsg('Set at least 1 required run.')
     if (!confirm('Lock these criteria? You will not be able to change them after this.')) return
     setBusy(true)
-    const { error } = await sb.from('verifications').update({ claim_text: f.claim_text.trim(), metric: f.metric.trim(), reported_value: spec.reported_value, tolerance: spec.tolerance, required_runs: spec.required_runs, locked_at: new Date().toISOString(), status: 'running', reported_result: String(spec.reported_value) }).eq('id', v.id)
+    const { error } = await sb.from('verifications').update({ claim_text: f.claim_text.trim(), metric: f.metric.trim(), reported_value: spec.reported_value, tolerance: spec.tolerance, required_runs: spec.required_runs, rule: f.rule, tolerance_mode: f.tolerance_mode, locked_at: new Date().toISOString(), status: 'running', reported_result: String(spec.reported_value) }).eq('id', v.id)
     setBusy(false); setMsg(error ? error.message : 'Criteria locked. You can now record runs.'); router.refresh()
   }
 
   async function save(nextRuns: Run[] = runs) {
     setBusy(true)
-    const s = { ...spec, runs: nextRuns }; const nv = computeVerdict(s); const m = stats(s)
+    const s = { ...spec, runs: nextRuns }; const e2 = evaluate(s); const nv = e2.verdict; const m = stats(s)
     const { error } = await sb.from('verifications').update({
       title: f.title.trim() || v.title, runs: nextRuns, verdict: nv, status: nv ? 'done' : locked ? 'running' : 'queued',
       measured_result: m.mean != null ? m.mean.toFixed(3) : null, notes: f.notes || null, blocked_reason: s.blocked_reason,
@@ -58,7 +64,8 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
 
   async function addRun() {
     const value = Number(nr.value)
-    if (!nr.failed && (nr.value === '' || Number.isNaN(value))) return setMsg('Enter the measured value, or tick "run failed".')
+    if (!nr.failed && (nr.value === '' || !Number.isFinite(value))) return setMsg('Enter the measured value, or tick "This run failed to complete".')
+    if (nr.failed && !nr.failure_reason.trim()) return setMsg('Say why the run failed. Failed runs stay on the record.')
     let proof: Proof | undefined
     setBusy(true)
     try {
@@ -76,7 +83,13 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
       }
       if (proof && nr.commit.trim()) proof.commit = nr.commit.trim()
     } catch (e: any) { setBusy(false); return setMsg(e?.message || 'Could not read the file.') }
-    const run: Run = { seed: nr.seed.trim() || undefined, value: nr.failed ? 0 : value, note: nr.note.trim() || undefined, failed: nr.failed, proof }
+    const meta: Meta = {}
+    META_KEYS.forEach((k) => { const x = String(nr[k]).trim(); if (x) meta[k] = x })
+    const run: Run = {
+      seed: nr.seed.trim() || undefined, value: nr.failed ? 0 : value, note: nr.note.trim() || undefined, failed: nr.failed,
+      failure_reason: nr.failed ? nr.failure_reason.trim() : undefined, proof, meta: Object.keys(meta).length ? meta : undefined,
+      recorded_at: new Date().toISOString(),
+    }
     await save([...runs, run])
     setNr({ ...EMPTY })
   }
@@ -85,6 +98,15 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
     if (!path) return
     const { data, error } = await sb.storage.from('evidence').createSignedUrl(path, 300)
     if (data?.signedUrl) window.open(data.signedUrl, '_blank'); else setMsg(error?.message || 'Could not open the file.')
+  }
+
+  async function verifyFile(i: number) {
+    const p = runs[i].proof
+    if (p?.kind !== 'file' || !p.path || !p.sha256) return
+    const { data, error } = await sb.storage.from('evidence').download(p.path)
+    if (error || !data) return setMsg(error?.message || 'Could not download the file.')
+    const hash = await sha256(data)
+    setMsg(hash === p.sha256 ? `Run #${i + 1}: the file matches its recorded fingerprint. It is unchanged since upload.` : `Run #${i + 1}: THE FILE DOES NOT MATCH its recorded fingerprint.`)
   }
 
   const vk = verdict ? VERDICT[verdict] : null
@@ -106,24 +128,32 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
         <div className="cols">
           <label className="fl"><span>Metric</span><input disabled={locked} value={f.metric} onChange={set('metric')} placeholder="Accuracy" /></label>
           <label className="fl"><span>Reported value</span><input disabled={locked} type="number" step="any" value={f.reported_value} onChange={set('reported_value')} placeholder="92" /></label>
-          <label className="fl"><span>Tolerance (±)</span><input disabled={locked} type="number" step="any" value={f.tolerance} onChange={set('tolerance')} placeholder="2" /></label>
+          <label className="fl"><span>Tolerance (±{f.tolerance_mode === 'relative' ? ' % of reported value' : ' same units'})</span><input disabled={locked} type="number" step="any" value={f.tolerance} onChange={set('tolerance')} placeholder="2" /></label>
           <label className="fl"><span>Runs required</span><input disabled={locked} type="number" min={1} value={f.required_runs} onChange={set('required_runs')} /></label>
         </div>
+        <div className="cols">
+          <label className="fl"><span>How the result is judged</span><select disabled={locked} value={f.rule} onChange={set('rule')}>{(Object.keys(RULE_LABEL) as Rule[]).map((k) => <option key={k} value={k}>{RULE_LABEL[k]}</option>)}</select></label>
+          <label className="fl"><span>Tolerance type</span><select disabled={locked} value={f.tolerance_mode} onChange={set('tolerance_mode')}><option value="absolute">Absolute (same units as the value)</option><option value="relative">Percentage of the reported value</option></select></label>
+        </div>
+        <p className="hint">Use “Lower is better” for error rates and losses, “Higher is better” for accuracy-style scores, and “Must match” when the paper’s exact number matters.</p>
         {!locked && <button className="btn solid" disabled={busy} onClick={lock}>Lock criteria</button>}
       </div>
 
       <div className="panel">
-        <h3>2. Runs ({st.n}{spec.required_runs ? ` of ${spec.required_runs}` : ''} counted)</h3>
-        <p className="hint">Record every run, including failures. Runs cannot be deleted. Attach a log or link so others can check it.</p>
+        <h3>2. Runs ({st.n}{spec.required_runs ? ` of ${spec.required_runs}` : ''} counted, {st.failed} failed)</h3>
+        <p className="hint">Record every run, including failures. Runs cannot be deleted or edited, and the database refuses any change to a recorded run.</p>
         {runs.length === 0 && <p className="hint">No runs yet.</p>}
         {runs.map((r, i) => (
           <div className="runrow" key={i}>
             <b>#{i + 1}</b><span>{r.failed ? 'Failed to complete' : r.value}</span><small>{r.seed ? `seed ${r.seed}` : ''} {r.note ?? ''}</small>
             <div className="proof">
-              {r.proof?.kind === 'file' && <>Log: {r.proof.name} · SHA-256 {r.proof.sha256?.slice(0, 12)}… <button type="button" className="link" onClick={() => openFile(r.proof?.path)}>Open</button></>}
+              {r.failed && r.failure_reason ? <>Failure reason: {r.failure_reason}<br /></> : null}
+              {r.proof?.kind === 'file' && <>Log: {r.proof.name} · SHA-256 {r.proof.sha256?.slice(0, 12)}… <button type="button" className="link" onClick={() => openFile(r.proof?.path)}>Open</button> · <button type="button" className="link" onClick={() => verifyFile(i)}>Check fingerprint</button></>}
               {r.proof?.kind === 'link' && <>Link: <a href={r.proof.url} target="_blank" rel="noreferrer">open</a></>}
-              {!r.proof && 'No proof attached'}
+              {!r.proof && 'No proof attached (self-reported)'}
               {r.proof?.commit ? ` · version ${r.proof.commit}` : ''}
+              <br />Recorded {r.recorded_at ? new Date(r.recorded_at).toLocaleString('en-GB') : 'before timestamps were added'}
+              {r.meta && Object.values(r.meta).some(Boolean) && <><br />{Object.entries(r.meta).filter(([, x]) => x).map(([k, x]) => `${k.replace('_', ' ')}: ${x}`).join(' · ')} (typed by the person recording the run)</>}
             </div>
           </div>
         ))}
@@ -133,7 +163,18 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
               <label className="fl"><span>Measured value</span><input type="number" step="any" value={nr.value} onChange={(e) => setNr({ ...nr, value: e.target.value })} disabled={nr.failed} /></label>
               <label className="fl"><span>Random seed</span><input value={nr.seed} onChange={(e) => setNr({ ...nr, seed: e.target.value })} /></label>
             </div>
-            <label className="fl"><span>Note (optional)</span><input value={nr.note} onChange={(e) => setNr({ ...nr, note: e.target.value })} placeholder="GPU, library versions, anything unusual" /></label>
+            <label className="fl"><span>Note (optional)</span><input value={nr.note} onChange={(e) => setNr({ ...nr, note: e.target.value })} placeholder="Anything unusual" /></label>
+            <details><summary>Environment details (optional)</summary>
+              <div className="cols">
+                <label className="fl"><span>Python version</span><input value={nr.python} onChange={(e) => setNr({ ...nr, python: e.target.value })} placeholder="3.11.9" /></label>
+                <label className="fl"><span>Operating system</span><input value={nr.os} onChange={(e) => setNr({ ...nr, os: e.target.value })} placeholder="Ubuntu 22.04" /></label>
+                <label className="fl"><span>Hardware</span><input value={nr.hardware} onChange={(e) => setNr({ ...nr, hardware: e.target.value })} placeholder="Colab T4 GPU" /></label>
+                <label className="fl"><span>Dataset version</span><input value={nr.dataset_version} onChange={(e) => setNr({ ...nr, dataset_version: e.target.value })} /></label>
+              </div>
+              <label className="fl"><span>Library versions</span><input value={nr.libraries} onChange={(e) => setNr({ ...nr, libraries: e.target.value })} placeholder="torch 2.4.0, numpy 1.26" /></label>
+              <label className="fl"><span>Experiment configuration</span><textarea rows={2} value={nr.config} onChange={(e) => setNr({ ...nr, config: e.target.value })} placeholder="epochs 12, batch 128, lr 0.001" /></label>
+              <label className="fl"><span>When the experiment was run</span><input type="datetime-local" value={nr.executed_at} onChange={(e) => setNr({ ...nr, executed_at: e.target.value })} /></label>
+            </details>
             <label className="fl"><span>Proof for this run</span>
               <select value={nr.kind} onChange={(e) => setNr({ ...nr, kind: e.target.value as any })}>
                 <option value="none">No proof (self-reported)</option>
@@ -144,6 +185,7 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
             {nr.kind === 'link' && <label className="fl"><span>Link (GitHub commit, Colab, experiment tracker)</span><input value={nr.link} onChange={(e) => setNr({ ...nr, link: e.target.value })} placeholder="https://github.com/…" /></label>}
             {nr.kind !== 'none' && <label className="fl"><span>Code version or commit (optional)</span><input value={nr.commit} onChange={(e) => setNr({ ...nr, commit: e.target.value })} /></label>}
             <label className="agree"><input type="checkbox" checked={nr.failed} onChange={(e) => setNr({ ...nr, failed: e.target.checked })} /><span>This run failed to complete</span></label>
+            {nr.failed && <label className="fl"><span>Why did it fail? (required)</span><input value={nr.failure_reason} onChange={(e) => setNr({ ...nr, failure_reason: e.target.value })} placeholder="Out of memory, crashed at epoch 4…" /></label>}
             <button className="btn solid" disabled={busy} onClick={addRun}>Add run</button>
           </div>
         )}
@@ -152,24 +194,27 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
       </div>
 
       <div className="panel result">
-        <h3>3. Verdict</h3>
-        <div style={{ marginBottom: 10 }}>
-          {level === 'none' && <span className="chip gray">Evidence level: no runs yet</span>}
-          {level === 'self' && <span className="chip warn">Evidence level: self-reported</span>}
-          {level === 'logs' && <span className="chip info">Evidence level: logs attached</span>}
-        </div>
-        <p className="hint">{level === 'logs' ? 'Every run has a log or link, and uploaded files carry a SHA-256 fingerprint so any change would show.' : 'At least one run has no proof attached, so others cannot check it. Attach a log or link to each run.'} Machine-run evidence, where ARIA runs the code itself, is coming later.</p>
-        {vk ? <><span className={`chip ${vk[1]} big`}>{vk[0]}</span><p>{EXPLAIN[verdict!]}</p></> : <p className="hint">Still collecting runs. A verdict appears once the required runs are recorded.</p>}
-        {st.mean != null && <div className="cols"><div><small>Average measured</small><b>{st.mean.toFixed(3)}</b></div><div><small>Reported</small><b>{spec.reported_value ?? '—'}</b></div><div><small>Difference</small><b>{diff != null ? diff.toFixed(3) : '—'}</b></div><div><small>Spread (sd)</small><b>{st.sd.toFixed(3)}</b></div></div>}
-        <p className="hint">Rule: reproduced only if the average and every run are within the tolerance and the spread is not larger than the tolerance. A failed reproduction never proves a paper is false.</p>
+        <h3>3. Experimental reproducibility</h3>
+        {vk ? <><span className={`chip ${vk[1]} big`}>{vk[0]}</span><p>{EXPLAIN[verdict!]}</p></> : <p className="hint">No verdict yet.</p>}
+        {ev.reasons.length > 0 && <p className="hint">{ev.reasons.join(' ')}</p>}
+        {st.mean != null && <div className="cols"><div><small>Average measured</small><b>{st.mean.toFixed(3)}</b></div><div><small>Reported</small><b>{spec.reported_value ?? '—'}</b></div><div><small>Difference</small><b>{diff != null ? diff.toFixed(3) : '—'}</b></div><div><small>Spread (sd)</small><b>{st.sd.toFixed(3)}</b></div><div><small>Failed attempts</small><b>{st.failed}</b></div></div>}
+        <p className="hint">This applies only to the selected claim, under its locked criteria. A failed reproduction never proves a paper is false.</p>
+        <h3 style={{ marginTop: 16 }}>Evidence integrity</h3>
+        <ul className="hint">
+          <li>{ec.total} runs recorded; {ec.self_reported_only} self-reported with nothing attached.</li>
+          <li>{ec.files} log files and {ec.links} links attached.</li>
+          <li>{ec.fingerprints} SHA-256 fingerprints recorded. A fingerprint shows a file is unchanged since upload. It does not show the experiment was real.</li>
+          <li>{ec.with_metadata} runs with environment details, typed by the person recording them.</li>
+          <li>Independent review: not established. Machine-executed runs: none (not built yet).</li>
+        </ul>
       </div>
 
       <div className="panel">
         <h3>4. Review and notes</h3>
         <label className="fl"><span>Can’t finish this check? Say why (this marks it Incomplete)</span><textarea rows={2} value={f.blocked_reason} onChange={set('blocked_reason')} placeholder="Code not released, dataset removed, needs 8 GPUs…" /></label>
-        <label className="fl"><span>Independent reviewer’s name</span><input value={f.reviewer_name} onChange={set('reviewer_name')} /></label>
-        <label className="agree"><input type="checkbox" checked={f.review_done} onChange={set('review_done')} /><span>A qualified person has reviewed this evidence</span></label>
-        <p className="hint">{f.review_done && String(f.reviewer_name).trim() ? `Human review: completed by ${f.reviewer_name}.` : 'Human review: pending. Reports are never shown as reviewed until a named person confirms.'}</p>
+        <label className="fl"><span>Reviewer’s name (typed by you, not verified)</span><input value={f.reviewer_name} onChange={set('reviewer_name')} /></label>
+        <label className="agree"><input type="checkbox" checked={f.review_done} onChange={set('review_done')} /><span>This person says they reviewed the evidence</span></label>
+        <p className="hint">{f.review_done && String(f.reviewer_name).trim() ? `${f.reviewer_name} is recorded as reviewer, but this is not authenticated, so it is not counted as independent review.` : 'No reviewer recorded.'}</p>
         <label className="fl"><span>Notes</span><textarea rows={3} value={f.notes} onChange={set('notes')} /></label>
       </div>
 
