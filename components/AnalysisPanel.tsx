@@ -71,7 +71,7 @@ export default function AnalysisPanel({ v }: { v: any }) {
       )}
       {status === 'done' && a && (
         <div>
-          <p className="hint">Quotes are checked against the paper’s own text by code. Everything marked “AI interpretation” is the AI’s reading and is not evidence. Nothing here has been independently verified or reproduced. {a.truncated && 'The paper was long, so only its first part was read.'}</p>
+          <p className="hint">Quotes are checked against the paper’s own text by code. Everything marked “AI interpretation” is the AI’s reading and is not evidence. Nothing here has been independently verified or reproduced. {a.imported && 'Imported from an AI chat; only the quotes were checked by ARIA. '}{a.truncated && 'The paper was long, so only its first part was read.'}</p>
           <details open><summary><b>Paper information</b></summary>
             <p><Paper /> <b>{a.paper?.title ?? 'Title not found'}</b></p>
             <p className="hint">{(a.paper?.authors ?? []).join(', ') || 'Authors not found'}<br />{[a.paper?.venue, a.paper?.publication_date].filter(Boolean).join(' · ')}
