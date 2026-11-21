@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabaseBrowser } from '@/lib/supabase/client'
 import { evaluate, stats, classifyEvidence, EXPLAIN, RULE_LABEL, type Run, type Proof, type Meta, type Rule } from '@/lib/verdict'
+import { applyCorrections, verdictImpact, type Correction } from '@/lib/corrections'
 import { VERDICT } from './bits'
 
 async function sha256(blob: Blob) {
@@ -15,8 +16,9 @@ const EMPTY = {
   python: '', libraries: '', os: '', hardware: '', dataset_version: '', config: '', executed_at: '',
 }
 const META_KEYS = ['python', 'libraries', 'os', 'hardware', 'dataset_version', 'config', 'executed_at'] as const
+const FIELD_LABEL: Record<string, string> = { value: 'measured value', seed: 'random seed', note: 'note', failure_reason: 'failure reason' }
 
-export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects: any[]; pdfUrl: string | null }) {
+export default function ReportEditor({ v, projects, pdfUrl, corrections }: { v: any; projects: any[]; pdfUrl: string | null; corrections: Correction[] }) {
   const router = useRouter(); const locked = !!v.locked_at
   const [f, setF] = useState({
     title: v.title as string, claim_text: v.claim_text ?? '', metric: v.metric ?? '', reported_value: v.reported_value ?? '',
@@ -26,29 +28,34 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
   })
   const [runs, setRuns] = useState<Run[]>(v.runs ?? [])
   const [nr, setNr] = useState({ ...EMPTY })
+  const [cx, setCx] = useState<{ i: number; field: string; value: string; reason: string } | null>(null)
   const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false)
   const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value })
   const num = (x: any) => (x === '' || x == null ? null : Number(x))
-  const spec = { reported_value: num(f.reported_value), tolerance: num(f.tolerance), required_runs: num(f.required_runs), runs, blocked_reason: String(f.blocked_reason).trim() || null, rule: f.rule, tolerance_mode: f.tolerance_mode }
-  const ev = evaluate(spec); const verdict = ev.verdict; const st = stats(spec); const ec = classifyEvidence(runs)
-  const quotaFull = spec.required_runs != null && st.n >= spec.required_runs
+  const specBase = { reported_value: num(f.reported_value), tolerance: num(f.tolerance), required_runs: num(f.required_runs), blocked_reason: String(f.blocked_reason).trim() || null, rule: f.rule, tolerance_mode: f.tolerance_mode }
+  const effRuns = applyCorrections(runs, corrections)
+  const spec = { ...specBase, runs: effRuns }
+  const ev = evaluate(spec); const verdict = ev.verdict; const st = stats(spec); const ec = classifyEvidence(effRuns)
+  const impact = verdictImpact(specBase, runs, corrections)
+  const quotaFull = specBase.required_runs != null && st.n >= specBase.required_runs
   const sb = supabaseBrowser()
 
   async function lock() {
     if (!f.claim_text.trim() || !f.metric.trim()) return setMsg('Write the claim and the metric first.')
-    if (spec.reported_value == null || Number.isNaN(spec.reported_value)) return setMsg('Enter the value the paper reports.')
-    if (!spec.tolerance || spec.tolerance <= 0) return setMsg('Set a tolerance above zero.')
-    if (f.tolerance_mode === 'relative' && spec.reported_value === 0) return setMsg('A percentage tolerance cannot be used when the reported value is 0.')
-    if (!spec.required_runs || spec.required_runs < 1) return setMsg('Set at least 1 required run.')
+    if (specBase.reported_value == null || Number.isNaN(specBase.reported_value)) return setMsg('Enter the value the paper reports.')
+    if (!specBase.tolerance || specBase.tolerance <= 0) return setMsg('Set a tolerance above zero.')
+    if (f.tolerance_mode === 'relative' && specBase.reported_value === 0) return setMsg('A percentage tolerance cannot be used when the reported value is 0.')
+    if (!specBase.required_runs || specBase.required_runs < 1) return setMsg('Set at least 1 required run.')
     if (!confirm('Lock these criteria? You will not be able to change them after this.')) return
     setBusy(true)
-    const { error } = await sb.from('verifications').update({ claim_text: f.claim_text.trim(), metric: f.metric.trim(), reported_value: spec.reported_value, tolerance: spec.tolerance, required_runs: spec.required_runs, rule: f.rule, tolerance_mode: f.tolerance_mode, locked_at: new Date().toISOString(), status: 'running', reported_result: String(spec.reported_value) }).eq('id', v.id)
+    const { error } = await sb.from('verifications').update({ claim_text: f.claim_text.trim(), metric: f.metric.trim(), reported_value: specBase.reported_value, tolerance: specBase.tolerance, required_runs: specBase.required_runs, rule: f.rule, tolerance_mode: f.tolerance_mode, locked_at: new Date().toISOString(), status: 'running', reported_result: String(specBase.reported_value) }).eq('id', v.id)
     setBusy(false); setMsg(error ? error.message : 'Criteria locked. You can now record runs.'); router.refresh()
   }
 
   async function save(nextRuns: Run[] = runs) {
     setBusy(true)
-    const s = { ...spec, runs: nextRuns }; const e2 = evaluate(s); const nv = e2.verdict; const m = stats(s)
+    const eff = applyCorrections(nextRuns, corrections)
+    const s = { ...specBase, runs: eff }; const nv = evaluate(s).verdict; const m = stats(s)
     const { error } = await sb.from('verifications').update({
       title: f.title.trim() || v.title, runs: nextRuns, verdict: nv, status: nv ? 'done' : locked ? 'running' : 'queued',
       measured_result: m.mean != null ? m.mean.toFixed(3) : null, notes: f.notes || null, blocked_reason: s.blocked_reason,
@@ -94,6 +101,37 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
     setNr({ ...EMPTY })
   }
 
+  function openCorrect(i: number) {
+    setMsg(''); setCx({ i, field: effRuns[i].failed ? 'failure_reason' : 'value', value: '', reason: '' })
+  }
+
+  async function submitCorrection() {
+    if (!cx) return
+    const reason = cx.reason.trim()
+    if (reason.length < 10) return setMsg('Explain the correction in at least 10 characters, and say what shows the new value is right.')
+    let newValue: any = cx.value.trim()
+    if (cx.field === 'value') {
+      const x = Number(cx.value)
+      if (cx.value.trim() === '' || !Number.isFinite(x)) return setMsg('Enter the corrected number.')
+      newValue = x
+    }
+    const oldValue = (effRuns[cx.i] as any)[cx.field] ?? null
+    setBusy(true)
+    const row = { verification_id: v.id, target_index: cx.i, field: cx.field, old_value: oldValue, new_value: newValue, reason }
+    const ins = await sb.from('corrections').insert(row)
+    if (ins.error) { setBusy(false); return setMsg(ins.error.message) }
+    const nextCorr = [...corrections, { ...row, created_at: new Date().toISOString() } as Correction]
+    const eff = applyCorrections(runs, nextCorr); const s = { ...specBase, runs: eff }
+    const nv = evaluate(s).verdict; const m = stats(s)
+    const upd = await sb.from('verifications').update({ verdict: nv, status: nv ? 'done' : locked ? 'running' : 'queued', measured_result: m.mean != null ? m.mean.toFixed(3) : null }).eq('id', v.id)
+    if (upd.error) setMsg(upd.error.message)
+    else {
+      if (nv && nv !== v.verdict) await sb.from('notifications').insert({ title: 'Verdict changed after a correction', body: `${f.title}: ${VERDICT[nv][0]}`, link: `/reports/${v.id}` })
+      setMsg('Correction recorded. The original is preserved.'); setCx(null); router.refresh()
+    }
+    setBusy(false)
+  }
+
   async function openFile(path?: string) {
     if (!path) return
     const { data, error } = await sb.storage.from('evidence').createSignedUrl(path, 300)
@@ -110,7 +148,9 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
   }
 
   const vk = verdict ? VERDICT[verdict] : null
-  const diff = st.mean != null && spec.reported_value != null ? st.mean - spec.reported_value : null
+  const diff = st.mean != null && specBase.reported_value != null ? st.mean - specBase.reported_value : null
+  const fieldsFor = (i: number) => (effRuns[i].failed ? ['failure_reason', 'seed', 'note'] : ['value', 'seed', 'note'])
+  const history = [...corrections].reverse()
   return (
     <div className="rp">
       <div className="panel">
@@ -123,7 +163,7 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
 
       <div className="panel">
         <h3>1. Claim and success criteria {locked && <span className="chip ok" style={{ marginLeft: 8 }}>Locked</span>}</h3>
-        <p className="hint">{locked ? 'These rules were fixed before any run was recorded, so the result cannot be bent to fit.' : 'Decide what counts as success before running anything. After you lock, these cannot change.'}</p>
+        <p className="hint">{locked ? 'These rules were fixed before any run was recorded, so the result cannot be bent to fit. They cannot be corrected. If one is wrong, start a new check.' : 'Decide what counts as success before running anything. After you lock, these cannot change.'}</p>
         <label className="fl"><span>The claim, quoted from the paper</span><textarea rows={2} disabled={locked} value={f.claim_text} onChange={set('claim_text')} placeholder="Model X achieves 92% accuracy on dataset Y" /></label>
         <div className="cols">
           <label className="fl"><span>Metric</span><input disabled={locked} value={f.metric} onChange={set('metric')} placeholder="Accuracy" /></label>
@@ -140,24 +180,52 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
       </div>
 
       <div className="panel">
-        <h3>2. Runs ({st.n}{spec.required_runs ? ` of ${spec.required_runs}` : ''} counted, {st.failed} failed)</h3>
-        <p className="hint">Record every run, including failures. Runs cannot be deleted or edited, and the database refuses any change to a recorded run.</p>
+        <h3>2. Runs ({st.n}{specBase.required_runs ? ` of ${specBase.required_runs}` : ''} counted, {st.failed} failed)</h3>
+        <p className="hint">Record every run, including failures. Recorded runs cannot be deleted or edited, and the database refuses any change to them. Mistakes are fixed with a correction, which keeps the original.</p>
         {runs.length === 0 && <p className="hint">No runs yet.</p>}
-        {runs.map((r, i) => (
-          <div className="runrow" key={i}>
-            <b>#{i + 1}</b><span>{r.failed ? 'Failed to complete' : r.value}</span><small>{r.seed ? `seed ${r.seed}` : ''} {r.note ?? ''}</small>
-            <div className="proof">
-              {r.failed && r.failure_reason ? <>Failure reason: {r.failure_reason}<br /></> : null}
-              {r.proof?.kind === 'file' && <>Log: {r.proof.name} · SHA-256 {r.proof.sha256?.slice(0, 12)}… <button type="button" className="link" onClick={() => openFile(r.proof?.path)}>Open</button> · <button type="button" className="link" onClick={() => verifyFile(i)}>Check fingerprint</button></>}
-              {r.proof?.kind === 'link' && <>Link: <a href={r.proof.url} target="_blank" rel="noreferrer">open</a></>}
-              {!r.proof && 'No proof attached (self-reported)'}
-              {r.proof?.commit ? ` · version ${r.proof.commit}` : ''}
-              <br />Recorded {r.recorded_at ? new Date(r.recorded_at).toLocaleString('en-GB') : 'before timestamps were added'}
-              {r.meta && Object.values(r.meta).some(Boolean) && <><br />{Object.entries(r.meta).filter(([, x]) => x).map(([k, x]) => `${k.replace('_', ' ')}: ${x}`).join(' · ')} (typed by the person recording the run)</>}
+        {runs.map((r, i) => {
+          const cs = corrections.filter((c) => c.target_index === i)
+          const valueFixed = cs.some((c) => c.field === 'value')
+          return (
+            <div className="runrow" key={i}>
+              <b>#{i + 1}</b>
+              <span>{r.failed ? 'Failed to complete' : valueFixed ? <><span className="orig">{r.value}</span> {effRuns[i].value}</> : r.value}</span>
+              <small>{effRuns[i].seed ? `seed ${effRuns[i].seed}` : ''} {effRuns[i].note ?? ''}</small>
+              {cs.length > 0 && <small className="chip warn">{cs.length} correction{cs.length > 1 ? 's' : ''}</small>}
+              {locked && <button type="button" className="link" onClick={() => openCorrect(i)}>Correct</button>}
+              <div className="proof">
+                {r.failed && effRuns[i].failure_reason ? <>Failure reason: {effRuns[i].failure_reason}<br /></> : null}
+                {r.proof?.kind === 'file' && <>Log: {r.proof.name} · SHA-256 {r.proof.sha256?.slice(0, 12)}… <button type="button" className="link" onClick={() => openFile(r.proof?.path)}>Open</button> · <button type="button" className="link" onClick={() => verifyFile(i)}>Check fingerprint</button></>}
+                {r.proof?.kind === 'link' && <>Link: <a href={r.proof.url} target="_blank" rel="noreferrer">open</a></>}
+                {!r.proof && 'No proof attached (self-reported)'}
+                {r.proof?.commit ? ` · version ${r.proof.commit}` : ''}
+                <br />Recorded {r.recorded_at ? new Date(r.recorded_at).toLocaleString('en-GB') : 'before timestamps were added'}
+                {r.meta && Object.values(r.meta).some(Boolean) && <><br />{Object.entries(r.meta).filter(([, x]) => x).map(([k, x]) => `${k.replace('_', ' ')}: ${x}`).join(' · ')} (typed by the person recording the run)</>}
+              </div>
+              {cx?.i === i && (
+                <div className="corr" style={{ flexBasis: '100%' }}>
+                  <label className="fl"><span>What to correct</span>
+                    <select value={cx.field} onChange={(e) => setCx({ ...cx, field: e.target.value, value: '' })}>{fieldsFor(i).map((k) => <option key={k} value={k}>{FIELD_LABEL[k]}</option>)}</select></label>
+                  <label className="fl"><span>Corrected {FIELD_LABEL[cx.field]}</span><input type={cx.field === 'value' ? 'number' : 'text'} step="any" value={cx.value} onChange={(e) => setCx({ ...cx, value: e.target.value })} /></label>
+                  <label className="fl"><span>Why, and what shows the new value is right (required)</span><textarea rows={2} value={cx.reason} onChange={(e) => setCx({ ...cx, reason: e.target.value })} placeholder="Typed 85 instead of 95; the log shows 95.1 on line 14" /></label>
+                  <p className="hint">The original stays on record and the correction will be visible in the history.</p>
+                  <div className="actions"><button className="btn solid" disabled={busy} onClick={submitCorrection}>Record correction</button><button className="btn" onClick={() => setCx(null)}>Cancel</button></div>
+                </div>
+              )}
             </div>
-          </div>
-        ))}
-        {locked && !quotaFull && !spec.blocked_reason && (
+          )
+        })}
+        {history.length > 0 && (
+          <details><summary><b>Correction history ({history.length})</b></summary>
+            {history.map((c, k) => (
+              <div className="corr" key={c.id ?? k}>
+                <b>Run #{c.target_index + 1} · {FIELD_LABEL[c.field]}</b>: <span className="orig">{String(c.old_value ?? '—')}</span> → {String(c.new_value ?? '—')}
+                <div className="hint">{c.reason} · {c.created_at ? new Date(c.created_at).toLocaleString('en-GB') : ''}</div>
+              </div>
+            ))}
+          </details>
+        )}
+        {locked && !quotaFull && !specBase.blocked_reason && (
           <div className="addrun">
             <div className="cols">
               <label className="fl"><span>Measured value</span><input type="number" step="any" value={nr.value} onChange={(e) => setNr({ ...nr, value: e.target.value })} disabled={nr.failed} /></label>
@@ -196,8 +264,9 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
       <div className="panel result">
         <h3>3. Experimental reproducibility</h3>
         {vk ? <><span className={`chip ${vk[1]} big`}>{vk[0]}</span><p>{EXPLAIN[verdict!]}</p></> : <p className="hint">No verdict yet.</p>}
+        {impact.changed && <p className="err" role="alert">This verdict depends on {impact.count} correction{impact.count > 1 ? 's' : ''}. With the originally recorded values the result is “{impact.original.verdict ? VERDICT[impact.original.verdict][0] : 'no verdict'}”; with the corrected values it is “{impact.corrected.verdict ? VERDICT[impact.corrected.verdict][0] : 'no verdict'}”.</p>}
         {ev.reasons.length > 0 && <p className="hint">{ev.reasons.join(' ')}</p>}
-        {st.mean != null && <div className="cols"><div><small>Average measured</small><b>{st.mean.toFixed(3)}</b></div><div><small>Reported</small><b>{spec.reported_value ?? '—'}</b></div><div><small>Difference</small><b>{diff != null ? diff.toFixed(3) : '—'}</b></div><div><small>Spread (sd)</small><b>{st.sd.toFixed(3)}</b></div><div><small>Failed attempts</small><b>{st.failed}</b></div></div>}
+        {st.mean != null && <div className="cols"><div><small>Average measured</small><b>{st.mean.toFixed(3)}</b></div><div><small>Reported</small><b>{specBase.reported_value ?? '—'}</b></div><div><small>Difference</small><b>{diff != null ? diff.toFixed(3) : '—'}</b></div><div><small>Spread (sd)</small><b>{st.sd.toFixed(3)}</b></div><div><small>Failed attempts</small><b>{st.failed}</b></div></div>}
         <p className="hint">This applies only to the selected claim, under its locked criteria. A failed reproduction never proves a paper is false.</p>
         <h3 style={{ marginTop: 16 }}>Evidence integrity</h3>
         <ul className="hint">
@@ -205,6 +274,7 @@ export default function ReportEditor({ v, projects, pdfUrl }: { v: any; projects
           <li>{ec.files} log files and {ec.links} links attached.</li>
           <li>{ec.fingerprints} SHA-256 fingerprints recorded. A fingerprint shows a file is unchanged since upload. It does not show the experiment was real.</li>
           <li>{ec.with_metadata} runs with environment details, typed by the person recording them.</li>
+          <li>{corrections.length} corrections recorded; the original values are preserved.</li>
           <li>Independent review: not established. Machine-executed runs: none (not built yet).</li>
         </ul>
       </div>
