@@ -2,6 +2,7 @@ import { notFound } from 'next/navigation'
 import { getSession } from '@/lib/session'
 import Shell from '@/components/Shell'
 import ReportEditor from '@/components/ReportEditor'
+import AnalysisPanel from '@/components/AnalysisPanel'
 
 export default async function ReportPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -17,7 +18,10 @@ export default async function ReportPage({ params }: { params: Promise<{ id: str
   return (
     <Shell active="reports" name={s.name} ini={s.ini} unread={s.unread}>
       <div className="welcome"><div><h1>Verification report</h1><p>Started {new Date(v.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</p></div></div>
-      <ReportEditor key={v.id + (v.locked_at ?? '')} v={v} projects={projects ?? []} pdfUrl={pdfUrl} />
+      <div className="rp">
+        <AnalysisPanel key={v.id + (v.analysis_status ?? '') + (v.selected_claim ?? '')} v={v} />
+        <ReportEditor key={v.id + (v.locked_at ?? '') + (v.selected_claim ?? '')} v={v} projects={projects ?? []} pdfUrl={pdfUrl} />
+      </div>
     </Shell>
   )
 }
