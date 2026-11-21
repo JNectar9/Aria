@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabaseBrowser } from '@/lib/supabase/client'
+import { VERDICT } from './bits'
 
 const STAGES: [string, string][] = [['reading', 'Reading the PDF'], ['analysing', 'Understanding the paper and finding its claims'], ['checking', 'Checking every quote against the paper']]
 const REPRO: Record<string, string> = { available: 'Reproducible with available resources', more_resources: 'Reproducible with additional resources', partial: 'Partially reproducible', not_now: 'Not currently reproducible', insufficient: 'Insufficient information' }
@@ -48,6 +49,12 @@ export default function AnalysisPanel({ v }: { v: any }) {
     router.refresh()
   }
 
+  const expStatus = (i: number) => {
+    if (v.selected_claim !== i) return { text: 'Not experimentally tested', cls: 'gray' }
+    if (v.verdict && VERDICT[v.verdict]) return { text: `Tested: ${VERDICT[v.verdict][0]}`, cls: VERDICT[v.verdict][1] }
+    return { text: locked ? 'Selected, runs in progress' : 'Selected, criteria not locked', cls: 'info' }
+  }
+
   return (
     <div className="panel">
       <h3>Paper analysis</h3>
@@ -71,9 +78,9 @@ export default function AnalysisPanel({ v }: { v: any }) {
       )}
       {status === 'done' && a && (
         <div>
-          <p className="hint">Quotes are checked against the paper’s own text by code. Everything marked “AI interpretation” is the AI’s reading and is not evidence. Nothing here has been independently verified or reproduced. {a.imported && 'Imported from an AI chat; only the quotes were checked by ARIA. '}{a.truncated && 'The paper was long, so only its first part was read.'}</p>
-          <details open><summary><b>Paper information</b></summary>
-            <p><Paper /> <b>{a.paper?.title ?? 'Title not found'}</b></p>
+          <p className="hint">Three different things are shown for each claim. <b>Source-matched quotation:</b> the words appear in the PDF. This says nothing about whether the claim is true. <b>AI interpretation:</b> the AI’s reading, which is not evidence. <b>Experimental status:</b> only recorded runs can change it. {a.imported && 'Imported from an AI chat; only the quotations were checked by ARIA. '}{a.truncated && 'The paper was long, so only its first part was read.'}</p>
+          <details open><summary><b>Paper information</b> <Paper /></summary>
+            <p><b>{a.paper?.title ?? 'Title not found'}</b></p>
             <p className="hint">{(a.paper?.authors ?? []).join(', ') || 'Authors not found'}<br />{[a.paper?.venue, a.paper?.publication_date].filter(Boolean).join(' · ')}
               {a.paper?.doi && <><br />DOI: <a href={`https://doi.org/${a.paper.doi}`} target="_blank" rel="noreferrer">{a.paper.doi}</a> (not yet checked against a registry)</>}</p>
           </details>
@@ -103,18 +110,19 @@ export default function AnalysisPanel({ v }: { v: any }) {
           {(a.claims ?? []).map((c: any, i: number) => {
             const cr = c.criteria ?? {}
             const usable = c.quote_verified && cr.reported_value != null && cr.metric
+            const es = expStatus(i)
             return (
               <details key={i} className="claim">
-                <summary><span className="chip gray">{c.claim_type}</span> {c.quote_verified ? <span className="chip ok">Quote verified, page {c.page}</span> : <span className="chip warn">Quote not found in paper</span>}{v.selected_claim === i && <span className="chip info" style={{ marginLeft: 6 }}>Selected</span>}<br />{c.quote}</summary>
-                <p><Paper /> Appears on page {c.page}.</p>
+                <summary><span className="chip gray">{c.claim_type}</span> {c.quote_verified ? <span className="chip ok">Source-matched, page {c.page}</span> : <span className="chip warn">Not found in PDF text</span>} <span className={`chip ${es.cls}`}>{es.text}</span><br />{c.quote}</summary>
+                <p><Paper /> <b>Source-matched quotation.</b> {c.quote_verified ? `These words appear on page ${c.page} of the PDF. That does not mean the claim is true.` : 'These words could not be found in the PDF text, so this claim cannot be used.'}</p>
                 {c.evidence && <p><AI /> <b>Evidence the authors give:</b> {c.evidence}</p>}
                 <p><AI /> <b>What it means:</b> {c.meaning}</p>
                 {c.requirements && <p><AI /> <b>To verify it:</b> {c.requirements}</p>}
                 {c.method && <p><AI /> <b>Suggested method:</b> {c.method}</p>}
                 <p><AI /> <b>Reproducibility:</b> {REPRO[c.reproducibility] ?? c.reproducibility}</p>
-                {cr.reported_value != null && <p className="hint">Suggested criteria: {cr.metric} = {cr.reported_value}{cr.dataset ? ` on ${cr.dataset}` : ''}{cr.baseline ? `, baseline ${cr.baseline}` : ''}; tolerance ±{cr.tolerance ?? '?'}{cr.tolerance_reason ? ` (${cr.tolerance_reason})` : ''}; {cr.required_runs ?? 3} runs.{c.value_in_quote === false && ' The number is not written in the quote, so check it against the paper.'}</p>}
-                {!c.quote_verified && <p className="err">This quote could not be found in the paper text, so it cannot be used.</p>}
-                {c.quote_verified && !usable && <p className="hint">This claim has no single number to test, so ARIA cannot score it yet. Its status would be NOT TESTED.</p>}
+                {cr.reported_value != null && <p className="hint">Suggested criteria: {cr.metric} = {cr.reported_value}{cr.dataset ? ` on ${cr.dataset}` : ''}{cr.baseline ? `, baseline ${cr.baseline}` : ''}; tolerance ±{cr.tolerance ?? '?'}{cr.tolerance_reason ? ` (${cr.tolerance_reason})` : ''}; {cr.required_runs ?? 3} runs.{c.value_in_quote === false && ' The number is not written in the quotation, so check it against the paper.'}</p>}
+                <p><span className={`chip ${es.cls}`}>Experimental status</span> <b>{es.text}.</b> {es.text.startsWith('Not') && 'Only recorded runs under locked criteria can change this.'}</p>
+                {c.quote_verified && !usable && <p className="hint">This claim has no single number to test, so ARIA cannot score it yet.</p>}
                 {usable && !locked && <button className="btn solid" onClick={() => useClaim(c, i)}>Use this claim for verification</button>}
                 {usable && locked && <p className="hint">Criteria are already locked on this report.</p>}
               </details>
