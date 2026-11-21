@@ -42,3 +42,5 @@ details{border-top:1px solid var(--line);padding:10px 0}
 details summary{cursor:pointer;font-weight:600}
 details.claim summary{font-weight:500;line-height:1.7}
 details p,details ul,details ol{margin:8px 0}
+.orig{text-decoration:line-through;color:var(--muted)}
+.corr{background:var(--soft);border-radius:12px;padding:12px;margin:8px 0}
